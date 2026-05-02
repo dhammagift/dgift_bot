@@ -1,0 +1,1 @@
+../../html/assets/texts/sutta_words_forbot.txt

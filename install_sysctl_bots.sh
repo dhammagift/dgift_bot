@@ -1,0 +1,1 @@
+../html/scripts/telegram_bot/install_sysctl_bots.sh
