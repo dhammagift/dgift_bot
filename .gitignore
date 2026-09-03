@@ -2,4 +2,5 @@ telegram
 nohup.out
 *.log
 *.json
+!config.example.json
 __pycache__

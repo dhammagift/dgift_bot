@@ -1,0 +1,6 @@
+{
+  "TOKEN": "123456:your-telegram-bot-token",
+  "NAME": "dgift_bot",
+  "WATCH_DIR": "/var/www/html/assets/texts/lbl/",
+  "ADMIN_ID": []
+}
