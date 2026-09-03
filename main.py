@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import urllib.parse
+import hashlib
 
 # Telegram Core
 from telegram import (
@@ -222,6 +223,26 @@ def load_words():
         logger.error(f"Dict load error: {e}")
         return {"original_words": [], "normalized_dict": {}}
 
+
+# === Кэш для длинных запросов ===
+QUERY_CACHE = {}
+
+def get_query_id(text: str) -> str:
+    if not text:
+        return ""
+    # Генерируем стабильный короткий ID (10 символов)
+    query_id = hashlib.md5(text.encode('utf-8')).hexdigest()[:10]
+    QUERY_CACHE[query_id] = text
+    
+    # Предотвращаем бесконечное разрастание кэша
+    if len(QUERY_CACHE) > 5000:
+        # Удаляем старые записи
+        for k in list(QUERY_CACHE.keys())[:1000]:
+            del QUERY_CACHE[k]
+            
+    return query_id
+
+
 # === Клавиатуры и Форматирование ===
 def create_keyboard(original_query: str, lang: str = "en", is_inline: bool = False) -> InlineKeyboardMarkup:
     link_q = get_link_query(original_query)
@@ -236,10 +257,13 @@ def create_keyboard(original_query: str, lang: str = "en", is_inline: bool = Fal
     toggle_label = "Язык Ru/En" if lang == "ru" else "Lang En/Ru"
 
     callback_prefix = "inline_" if is_inline else ""
+    
+    # Получаем короткий ID вместо длинного текста
+    query_id = get_query_id(original_query)
+    
     keyboard = [
         [
-            # Сохраняем original_query в callback, чтобы при смене языка не терялось название сутты
-            InlineKeyboardButton(text=toggle_label, callback_data=f"{callback_prefix}toggle_lang:{lang}:{original_query}"),
+            InlineKeyboardButton(text=toggle_label, callback_data=f"{callback_prefix}toggle_lang:{lang}:{query_id}"),
             InlineKeyboardButton(text=label_dict, url=dict_url),
         ],
         [InlineKeyboardButton(text=label_site, url=search_url)]
@@ -380,7 +404,13 @@ async def toggle_language(update: Update, context: CallbackContext):
     parts = query.data.split(':')
     is_inline = parts[0] == 'inline_toggle_lang'
     new_lang = 'ru' if parts[1] == 'en' else 'en'
-    original_text = ':'.join(parts[2:])
+    
+    # Получаем ID из callback_data
+    query_id = ':'.join(parts[2:])
+    
+    # Достаем оригинальный текст из кэша. Если произошел перезапуск бота (кэш пуст), 
+    # используем сам query_id в качестве фоллбека.
+    original_text = QUERY_CACHE.get(query_id, query_id)
     
     save_user_data(query.from_user.id, 'share_lang', new_lang)
     save_user_data(query.from_user.id, 'lang', new_lang)
@@ -394,6 +424,7 @@ async def toggle_language(update: Update, context: CallbackContext):
         parse_mode="HTML", 
         disable_web_page_preview=True
     )
+
 def main():
     os.makedirs("assets", exist_ok=True)
 
