@@ -4,3 +4,10 @@ nohup.out
 *.json
 !config.example.json
 __pycache__
+
+# The offline city gazetteer: the GeoNames dump under geo/ is the input (cities15000.txt, admin1.txt, and the
+# country names CLDR gives), the index is built from it (python geolocal.py --build) and is not kept, and the
+# mode file is runtime state, not source.
+geo/gazetteer.pkl
+geo_mode.txt
+!geo/countries.json
