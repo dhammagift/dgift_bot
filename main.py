@@ -1,6 +1,7 @@
 # Standard Library
 import json
 import os
+import asyncio
 import logging
 import re
 import sys
@@ -26,11 +27,13 @@ from telegram.ext import (
     MessageHandler,
     InlineQueryHandler,
     CallbackQueryHandler,
+    TypeHandler,
     filters,
     CallbackContext,
 )
 
 from watcher import create_watcher_post_init
+import geolocal
 
 
 # === Сообщения ===
@@ -47,6 +50,7 @@ WELCOME_MESSAGES = {
         "Following commands available:\n"
         "/start - this message\n"
         "/extra - Mini App links\n"
+        "/uposatha - Uposatha days for the next 30 days (<code>/uposatha Colombo</code> for a city; inline: <code>@dgift_bot uposatha</code>)\n"
         "/help - Dhamma.gift help will be here\n\n"
         "Change Bots language 👇 Изменить язык \n"
     ),
@@ -62,6 +66,7 @@ WELCOME_MESSAGES = {
         "Доступны следующие команды:\n"
         "/start - это сообщение\n"
         "/extra - ссылки на Mini Apps\n"
+        "/uposatha - дни Упосатхи на 30 дней (<code>/uposatha Москва</code> — для города; в инлайне: <code>@dgift_bot упосатха</code>)\n"
         "/help - здесь будет документация Dhamma.gift\n\n"
         "Изменить язык Бота 👇 Change Language\n"
     )
@@ -95,6 +100,7 @@ with open(config_path, "r") as f:
 
 bot_name = config.get("NAME", "default_bot")
 TOKEN = config.get("TOKEN", "")
+ADMIN_IDS = {int(x) for x in config.get("ADMIN_ID", []) if str(x).lstrip("-").isdigit()}
 
 # === Логирование ===
 class TelegramTokenFilter(logging.Formatter):
@@ -230,7 +236,10 @@ QUERY_CACHE = {}
 def get_query_id(text: str) -> str:
     if not text:
         return ""
-    # Генерируем стабильный короткий ID (10 символов)
+    # Short text goes into callback_data as is (survives bot restarts); callback_data is limited to 64 bytes,
+    # "inline_toggle_lang:ru:" takes 22. Longer text: stable 10-char hash (kept in memory only).
+    if len(text.encode('utf-8')) <= 40:
+        return text
     query_id = hashlib.md5(text.encode('utf-8')).hexdigest()[:10]
     QUERY_CACHE[query_id] = text
     
@@ -243,14 +252,18 @@ def get_query_id(text: str) -> str:
     return query_id
 
 
+# === Site links (clean paths: dhamma.gift/<word>, dict.dhamma.gift/<word>) ===
+def site_url(q: str, lang: str) -> str:
+    return f"https://dhamma.gift/{urllib.parse.quote(q)}{'?lang=ru' if lang == 'ru' else ''}"
+
+def dict_url_for(q: str, lang: str) -> str:
+    return f"https://dict.dhamma.gift/{'ru/' if lang == 'ru' else ''}{urllib.parse.quote(q)}"
+
 # === Клавиатуры и Форматирование ===
 def create_keyboard(original_query: str, lang: str = "en", is_inline: bool = False) -> InlineKeyboardMarkup:
     link_q = get_link_query(original_query)
-    path = "ru/" if lang == "ru" else ""
-    encoded_q = urllib.parse.quote_plus(link_q)
-    
-    search_url = f"https://f.dhamma.gift/{path}?p=-kn&q={encoded_q}"
-    dict_url = f"https://dict.dhamma.gift/{path}?silent&q={encoded_q}"
+    search_url = site_url(link_q, lang)
+    dict_url = dict_url_for(link_q, lang)
 
     label_dict = "📘 Словарь" if lang == "ru" else "📘 Dictionary"
     label_site = f"{'Читать на' if lang == 'ru' else 'Read at'} 🔎 Dhamma.gift {'Ru' if lang == 'ru' else 'En'}"
@@ -271,10 +284,8 @@ def create_keyboard(original_query: str, lang: str = "en", is_inline: bool = Fal
     return InlineKeyboardMarkup(keyboard)
 
 def format_message_with_links(display_text: str, link_query: str, lang: str = "en") -> str:
-    path = "ru/" if lang == "ru" else ""
-    encoded_q = urllib.parse.quote_plus(link_query)
-    search_url = f"https://f.dhamma.gift/{path}?p=-kn&q={encoded_q}"
-    dict_url = f"https://dict.dhamma.gift/{path}?silent&q={encoded_q}"
+    search_url = site_url(link_query, lang)
+    dict_url = dict_url_for(link_query, lang)
     label_dict = "📘 Словарь" if lang == "ru" else "📘 Dictionary"
     return f"\n{display_text}\n\n🔎 <a href='{search_url}'>Dhamma.gift</a> | <a href='{dict_url}'>{label_dict}</a>"
 
@@ -282,7 +293,7 @@ def format_message_with_links(display_text: str, link_query: str, lang: str = "e
 async def set_menu_button(update: Update, lang: str):
     user_id = update.effective_user.id
     button_text = "DG ru" if lang == "ru" else "DG en"
-    button_url = f"https://f.dhamma.gift/{'ru/' if lang == 'ru' else ''}?source=pwa"
+    button_url = f"https://dhamma.gift/?{'lang=ru&' if lang == 'ru' else ''}source=pwa"
     try:
         await update.get_bot().set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonWebApp(text=button_text, web_app=WebAppInfo(url=button_url)))
     except: pass
@@ -316,8 +327,249 @@ async def handle_extra_toggle(update: Update, context: CallbackContext):
     keyboard = [[InlineKeyboardButton("English" if new_lang == "ru" else "Русский", callback_data=f"extra_toggle:{new_lang}")]]
     await query.edit_message_text(text=EXTRA_MESSAGES[new_lang], reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
+# === Uposatha schedule as plain text (engine: dg-node-prod uposatha-core.js via upo.js) ===
+UPO_WORDS = {"uposatha", "упосатха", "упосатхи", "упосатху"}
+UPO_DEFAULT_TZ = "Asia/Kolkata"  # Bodh Gaya; without a city the day runs 18:00 to 18:00
+UPO_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upo_cache.json")
+GEO_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "geo_cache.json")
+GEO_CACHE_VERSION = 2  # bump it when the labels change: the cache lives on disk and has no expiry
+# Which geocoder answers: "online" is the Open-Meteo API, "offline" the 34k cities kept in geo/ (instant,
+# no network, tolerates typos, but holds ~90 MB). Switched with /geo, remembered in geo_mode.txt; the file
+# wins over the GEO_MODE environment variable.
+GEO_MODE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "geo_mode.txt")
+
+def geo_mode() -> str:
+    try:
+        with open(GEO_MODE_FILE, encoding="utf-8") as f:
+            mode = f.read().strip().lower()
+        if mode in ("online", "offline"):
+            return mode
+    except OSError:
+        pass
+    return "offline" if os.environ.get("GEO_MODE", "").strip().lower() == "offline" else "online"
+
+def set_geo_mode(mode: str):
+    with open(GEO_MODE_FILE, "w", encoding="utf-8") as f:
+        f.write(mode + "\n")
+    if mode == "online":
+        geolocal.unload()  # the point of the switch: the cities go back to the OS
+
+def _cache_read(path: str) -> dict:
+    """Both caches outlive a restart: the first query for a city after a deploy should not wait again."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {tuple(k): v for k, v in json.load(f)}
+    except Exception:
+        return {}
+
+def _cache_write(path: str, cache: dict, keep: int):
+    try:
+        if len(cache) > keep:
+            for k in sorted(cache, key=lambda k: cache[k][0] if isinstance(cache[k], list) and cache[k] and isinstance(cache[k][0], (int, float)) else 0)[:len(cache) - keep]:
+                cache.pop(k, None)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump([[list(k), v] for k, v in cache.items()], f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.error(f"cache write failed for {path}: {e}")
+
+_upo_cache = _cache_read(UPO_CACHE_FILE)
+_geo_cache = _cache_read(GEO_CACHE_FILE)
+
+def _fetch_json(url: str):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "dgift-bot"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.load(r)
+
+async def geocode(name: str, lang: str) -> list:
+    """City candidates {label, lat, lon, tz}. Offline: the local GeoNames dump (instant, no network, typos
+    tolerated — see geolocal.py). Online: the Open-Meteo API. So far the API is what a missing local answer
+    falls back to either way."""
+    import asyncio
+    key = (name.lower(), lang, GEO_CACHE_VERSION)
+    if key in _geo_cache:
+        return _geo_cache[key]
+    found = geolocal.search(name, lang) if geo_mode() == "offline" else []
+    if not found:
+        found = await _geocode_request(name, _geo_lang(name, lang))
+        if not found:
+            # The wrong guess for the language of the name finds nothing at all ("алматы" asked for in English
+            # is an empty answer, not a bad one): one retry in the other language covers mixed input.
+            found = await _geocode_request(name, "en" if _geo_lang(name, lang) == "ru" else "ru")
+    _geo_cache[key] = found
+    _cache_write(GEO_CACHE_FILE, _geo_cache, 500)
+    return found
+
+def _geo_lang(name: str, lang: str) -> str:
+    """Open-Meteo searches the names of the language it is asked for, so a Cyrillic city must be asked for
+    in Russian: «алматы» with language=en returns nothing while language=ru returns Алматы."""
+    return "ru" if re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", name) else lang
+
+async def _geocode_request(name: str, lang: str) -> list:
+    import asyncio
+    url = "https://geocoding-api.open-meteo.com/v1/search?count=3&format=json&language=%s&name=%s" % (lang, urllib.parse.quote(name))
+    try:
+        data = await asyncio.to_thread(_fetch_json, url)
+    except Exception as e:
+        logger.error(f"geocode failed: {e}")
+        return []
+    return [{"label": ", ".join(dict.fromkeys(x for x in (g.get("name"), g.get("admin1"), g.get("country")) if x)),  # drops repeats like "Алматы, Алматы"
+             "lat": g["latitude"], "lon": g["longitude"], "tz": g.get("timezone", "UTC")}
+            for g in data.get("results", [])]
+
+async def uposatha_text(lang: str, place: dict = None) -> str:
+    import asyncio, time
+    # The schedule is cached for an hour, and the key carries the mtimes of what produces it — the script and the engine
+    # it requires (_upo_mtime): editing either (a new layout, another column, a new rule for the key days) must not keep
+    # serving the text it produced before the edit. That is why "не поменялось": the cache outlived the change.
+    key = (lang, place["label"] if place else None, _upo_mtime())
+    hit = _upo_cache.get(key)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    args = [lang, place["tz"] if place else UPO_DEFAULT_TZ, "30"]
+    if place:
+        args += [str(place["lat"]), str(place["lon"]), place["label"]]
+    proc = await asyncio.create_subprocess_exec(
+        "node", UPO_JS, *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await proc.communicate()
+    text = out.decode().strip()
+    if text:
+        _upo_cache[key] = (time.time(), text)
+        _cache_write(UPO_CACHE_FILE, _upo_cache, 200)
+    return text
+
+UPO_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upo.js")
+# The engine upo.js requires (the same file the site and the apps use): it decides the days, so its mtime belongs in the
+# cache key as much as the script's — an edit there left the old schedule served for the rest of the hour.
+UPO_CORE = "/var/www/dg-node-prod/public/overrides/js/uposatha-core.js"
+
+def _upo_mtime() -> float:
+    stamps = []
+    for f in (UPO_JS, UPO_CORE):
+        try:
+            stamps.append(os.path.getmtime(f))
+        except OSError:
+            pass
+    return max(stamps) if stamps else 0
+
+async def _uposatha_prewarm():
+    # Offline mode reads the 34k cities once, here, so that the first query does not pay for the load.
+    if geo_mode() == "offline":
+        await asyncio.to_thread(geolocal.load)
+    for lang in ("ru", "en"):
+        try:
+            await uposatha_text(lang)
+        except Exception as e:
+            logger.error(f"uposatha prewarm failed: {e}")
+
+async def geo_command(update: Update, context: CallbackContext):
+    """Admin only: which geocoder answers. /geo offline — the 34k cities from geo/ in RAM; /geo online — the
+    Open-Meteo API, and the city names go back to the OS."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    arg = context.args[0].strip().lower() if context.args else ""
+    if arg in ("online", "api", "онлайн"):
+        set_geo_mode("online")
+    elif arg in ("offline", "local", "офлайн"):
+        set_geo_mode("offline")
+        await asyncio.to_thread(geolocal.load)
+    elif arg:
+        await update.message.reply_text("Использование: /geo online | /geo offline")
+        return
+    try:
+        with open("/proc/self/status") as f:
+            rss = int(next(l.split()[1] for l in f if l.startswith("VmRSS"))) // 1024
+    except Exception:
+        rss = 0
+    await update.message.reply_text(
+        f"Геокодер: {'офлайн (локальные города)' if geo_mode() == 'offline' else 'онлайн (Open-Meteo)'}\n"
+        f"Города в памяти: {'да' if geolocal.loaded() else 'нет'} · RSS {rss} МБ")
+
+_place_labels = {}  # "lat,lon" -> label, so the language button can rebuild the header
+_inline_seq = {}    # user_id -> number of the latest inline query, so a superseded keystroke can stop
+
+def _inline_touch(user_id: int) -> int:
+    seq = _inline_seq.get(user_id, 0) + 1
+    _inline_seq[user_id] = seq
+    return seq
+
+def _inline_stale(user_id: int, seq: int) -> bool:
+    return _inline_seq.get(user_id) != seq
+
+def upo_keyboard(lang: str, place: dict = None) -> InlineKeyboardMarkup:
+    """Ru/En switch (callback_data, <=64 bytes, carries the place) and the calendar link: the link lives on a button, not in the text."""
+    where = "-"
+    if place:
+        where = f"{round(place['lat'], 2)},{round(place['lon'], 2)},{place['tz']}"
+        _place_labels[where.rsplit(",", 1)[0]] = place["label"]
+    label = "Язык Ru/En" if lang == "ru" else "Lang En/Ru"
+    new_lang = "en" if lang == "ru" else "ru"
+    cal_label = "📅 Календарь упосатх" if lang == "ru" else "📅 Uposatha calendar"
+    cal_url = "https://dhamma.gift/uposatha-calendar" + ("?lang=ru" if lang == "ru" else "")
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(label, callback_data=f"upo:{new_lang}:{where}"),
+        InlineKeyboardButton(cal_label, url=cal_url),
+    ]])
+
+async def upo_toggle(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    _, lang, where = query.data.split(":", 2)
+    place = None
+    if where != "-":
+        lat, lon, tz = where.split(",", 2)
+        place = {"lat": float(lat), "lon": float(lon), "tz": tz, "label": _place_labels.get(f"{lat},{lon}", tz)}
+    text = await uposatha_text(lang, place)
+    await query.edit_message_text(text=text, reply_markup=upo_keyboard(lang, place), parse_mode="HTML", disable_web_page_preview=True)
+
+def saved_place(user_id: int):
+    """The city the inline query falls back to (it is not used by the command: "/uposatha" without an argument
+    is the common list, not somebody's last city)."""
+    raw = load_user_data().get(str(user_id), {}).get("city")
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+RESET_WORDS = ("reset", "-", "сброс")
+
+async def uposatha_command(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    lang = get_user_share_lang(user_id)
+    ru = lang == "ru"
+    name = " ".join(context.args).strip()
+    # "/uposatha" without an argument keeps showing the city saved earlier (the same one the inline falls back
+    # to); "/uposatha <city>" saves a new one, and the reset is spelled out — "/uposatha reset", not a dash
+    # nobody reads as a command.
+    place = None
+    if name.lower() in RESET_WORDS:
+        save_user_data(user_id, "city", "")
+        note = ("Сохранённый город сброшен · показываю Бодхгаю" if ru
+                else "Saved city cleared · showing Bodh Gaya")
+    elif name:
+        found = await geocode(name, lang)
+        if not found:
+            await update.message.reply_text("Город не найден 🤷" if ru else "City not found 🤷")
+            return
+        place = found[0]
+        save_user_data(user_id, "city", json.dumps(place, ensure_ascii=False))
+        note = (f"{place['label']} — сохранённый город · /uposatha reset — сбросить" if ru
+                else f"{place['label']} — saved city · /uposatha reset to clear it")
+    else:
+        place = saved_place(user_id)
+        note = ((f"{place['label']} — сохранённый город · /uposatha reset — сбросить" if ru
+                 else f"{place['label']} — saved city · /uposatha reset to clear it") if place
+                else ("/uposatha &lt;город&gt; — расписание для города" if ru
+                      else "/uposatha &lt;city&gt; — the schedule for a city"))
+    text = await uposatha_text(lang, place)
+    await update.message.reply_text((text or "—") + "\n\n" + note, reply_markup=upo_keyboard(lang, place), parse_mode="HTML", disable_web_page_preview=True)
+
 async def inline_query(update: Update, context: CallbackContext):
     query_text = update.inline_query.query.strip()
+    logger.info(f"inline query from {update.inline_query.from_user.id}: {query_text!r}")
     user_id = update.inline_query.from_user.id
     
     # Получаем настройки языка
@@ -335,12 +587,51 @@ async def inline_query(update: Update, context: CallbackContext):
     btn_text = f"🔎 {action_text}: {link_q}" if query_text else f"🔎 {action_text}"
     
     # Формируем URL для WebApp
-    path = "ru/" if share_lang == "ru" else ""
-    encoded_q = urllib.parse.quote_plus(link_q)
-    final_url = f"https://f.dhamma.gift/{path}{'?p=-kn&q=' + encoded_q if query_text else ''}"
+    final_url = site_url(link_q if query_text else "", share_lang)
     
     hot_button = InlineQueryResultsButton(text=btn_text, web_app=WebAppInfo(url=final_url))
     results = []
+
+    # Uposatha: empty query, or "uposatha [city]" (the Pali word keeps working below as a normal search)
+    word, _, city = query_text.partition(" ")
+    if not query_text or word.lower() in UPO_WORDS:
+        ru = share_lang == "ru"
+        city = " ".join(city.split())  # "chiang  mai " -> "chiang mai"
+        # An inline query arrives on every keystroke. Give each one a number, and let a superseded one stop
+        # before the (slow) schedule is computed and before it answers: the last keystroke is the one the
+        # person is waiting for.
+        seq = _inline_touch(user_id)
+        # No city typed: the inline falls back to the city the person saved with "/uposatha <city>", or Bodh Gaya.
+        places = await geocode(city, share_lang) if city else [saved_place(user_id)]
+        if _inline_stale(user_id, seq):
+            return
+        if city and not places:
+            results.append(InlineQueryResultArticle(
+                id="uposatha_nocity",
+                title=f"Город не найден: «{city}»" if ru else f"City not found: “{city}”",
+                description=("Проверьте написание, например «упосатха Чиангмай»" if ru else "Check the spelling, e.g. «uposatha Chiang Mai»"),
+                input_message_content=InputTextMessageContent(
+                    (f"🌗 Город «{city}» не найден. Проверьте написание, например: «упосатха Чиангмай»." if ru
+                     else f"🌗 City “{city}” not found. Check the spelling, e.g. «uposatha Chiang Mai».")),
+            ))
+        else:
+            # All the candidates at once: one node run each, and they cost the same wall time together as one
+            texts = await asyncio.gather(*[uposatha_text(share_lang, p) for p in places])
+            if _inline_stale(user_id, seq):
+                return
+            for i, (place, upo) in enumerate(zip(places, texts)):
+                if not upo:
+                    continue
+                where = f" — {place['label']}" if place else ""
+                results.append(InlineQueryResultArticle(
+                    id=f"uposatha_{i}",
+                    # no emoji in the title: Telegram would draw it again as the item's thumbnail (two moons)
+                    title=("Дни Упосатхи на 30 дней" if ru else "Uposatha days, next 30 days") + where,
+                    description=(("Бодхгая, 18:00→18:00 · свой город: «упосатха Алматы»" if ru else "Bodh Gaya, 18:00 to 18:00 · your city: «uposatha Almaty»")
+                                 if not place else ("Отправить расписание в чат" if ru else "Send the schedule to the chat")),
+                    input_message_content=InputTextMessageContent(upo, parse_mode="HTML", disable_web_page_preview=True),
+                    reply_markup=upo_keyboard(share_lang, place),
+                ))
 
     if query_text:
         suggestions = autocomplete(query_text)
@@ -428,17 +719,45 @@ async def toggle_language(update: Update, context: CallbackContext):
 def main():
     os.makedirs("assets", exist_ok=True)
 
-    app = Application.builder().token(TOKEN).post_init(create_watcher_post_init(config)).build()
+    watcher_init = create_watcher_post_init(config)
 
+    async def post_init(app):
+        # Command menu, so everyone sees that the Uposatha mode exists
+        from telegram import BotCommand
+        for lang_code, cmds in (
+            (None, [("start", "Start"), ("extra", "Mini Apps"), ("uposatha", "Uposatha days, next 30 days")]),
+            ("ru", [("start", "Начать"), ("extra", "Мини-приложения"), ("uposatha", "Дни Упосатхи на 30 дней")]),
+        ):
+            try:
+                await app.bot.set_my_commands([BotCommand(c, d) for c, d in cmds], language_code=lang_code)
+            except Exception as e:
+                logger.error(f"set_my_commands failed: {e}")
+        await watcher_init(app)
+        # The list the empty inline query and /uposatha show, in both languages, computed now: nobody should
+        # pay for the astronomy in the first second after a deploy.
+        asyncio.create_task(_uposatha_prewarm())
+
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+
+    async def log_update(update: Update, context: CallbackContext):  # debug: which update types reach the bot
+        kinds = [k for k in ("message", "inline_query", "chosen_inline_result", "callback_query") if getattr(update, k, None)]
+        if kinds != ["inline_query"]:
+            logger.info(f"update kinds: {kinds}")
+        if update.callback_query:
+            logger.info(f"callback_query data={update.callback_query.data!r} inline={bool(update.callback_query.inline_message_id)}")
+    app.add_handler(TypeHandler(Update, log_update), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("extra", extra_command))
+    app.add_handler(CommandHandler("uposatha", uposatha_command))
+    app.add_handler(CommandHandler("geo", geo_command))
     app.add_handler(CallbackQueryHandler(handle_language_selection, pattern="^lang_set:"))
     app.add_handler(CallbackQueryHandler(handle_extra_toggle, pattern=r"^extra_toggle:"))
+    app.add_handler(CallbackQueryHandler(upo_toggle, pattern=r"^upo:"))
     app.add_handler(CallbackQueryHandler(toggle_language, pattern=r"^(inline_)?toggle_lang:"))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)  # explicit: callback_query must never be filtered out
 
 if __name__ == "__main__":
     main()
