@@ -257,7 +257,8 @@ def site_url(q: str, lang: str) -> str:
     return f"https://dhamma.gift/{urllib.parse.quote(q)}{'?lang=ru' if lang == 'ru' else ''}"
 
 def dict_url_for(q: str, lang: str) -> str:
-    return f"https://dict.dhamma.gift/{'ru/' if lang == 'ru' else ''}{urllib.parse.quote(q)}"
+    # ?silent: open the dictionary straight away, without flashing the home page
+    return f"https://dict.dhamma.gift/{'ru/' if lang == 'ru' else ''}{urllib.parse.quote(q)}?silent"
 
 # === Клавиатуры и Форматирование ===
 def create_keyboard(original_query: str, lang: str = "en", is_inline: bool = False) -> InlineKeyboardMarkup:
