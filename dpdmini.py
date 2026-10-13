@@ -9,12 +9,15 @@ import os
 import re
 import sqlite3
 import threading
+import time
 
 SRC = "/var/www/dg-node-prod/public/overrides/js/standalone-dpd/"
 FILES = {"i2h": "dpd_i2h.js", "en": "dpd_ebts.js", "ru": "ru/dpd_ebts.js"}
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dpd_mini.sqlite")
 _lock = threading.Lock()
 _conn = None
+_checked = 0.0
+RECHECK_SECONDS = 30 * 86400  # the dictionary files change rarely: look for a newer one once a month
 
 
 def _load(name):
@@ -47,13 +50,29 @@ def _build():
     os.replace(tmp, DB)
 
 
-def _db():
+def _refresh():
     global _conn
+    try:
+        if _stale():
+            _build()  # builds a temp file and swaps it in, so queries keep working meanwhile
+            with _lock:
+                _conn = sqlite3.connect(DB, check_same_thread=False)
+    except Exception:
+        pass  # keep answering from the old database
+
+
+def _db():
+    global _conn, _checked
     with _lock:
+        now = time.time()
         if _conn is None:
             if _stale():
                 _build()
             _conn = sqlite3.connect(DB, check_same_thread=False)
+            _checked = now
+        elif now - _checked > RECHECK_SECONDS:
+            _checked = now
+            threading.Thread(target=_refresh, daemon=True).start()
         return _conn
 
 

@@ -319,6 +319,33 @@ async def handle_language_selection(update: Update, context: CallbackContext):
     await query.edit_message_text(text=WELCOME_MESSAGES[new_lang], reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     await set_menu_button(update, new_lang)
 
+def language_keyboard(lang: str):
+    # the current language is marked with a check; a tap sets exactly that language (not a toggle)
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(("✓ " if lang == "en" else "") + "English", callback_data="setlang:en"),
+        InlineKeyboardButton(("✓ " if lang == "ru" else "") + "Русский", callback_data="setlang:ru"),
+    ]])
+
+LANGUAGE_TEXT = {"en": "Interface language:", "ru": "Язык интерфейса:"}
+
+async def language_command(update: Update, context: CallbackContext):
+    lang = get_user_lang(update.effective_user.id)
+    await update.effective_message.reply_text(LANGUAGE_TEXT[lang], reply_markup=language_keyboard(lang))
+
+async def handle_setlang(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    new_lang = query.data.split(':')[1]
+    if new_lang not in ("en", "ru"):
+        return
+    save_user_data(query.from_user.id, 'lang', new_lang)
+    save_user_data(query.from_user.id, 'share_lang', new_lang)
+    try:
+        await query.edit_message_text(text=LANGUAGE_TEXT[new_lang], reply_markup=language_keyboard(new_lang))
+    except Exception:
+        pass  # "message is not modified": the same language was tapped again
+    await set_menu_button(update, new_lang)
+
 async def extra_command(update: Update, context: CallbackContext):
     lang = get_user_lang(update.effective_user.id)
     keyboard = [[InlineKeyboardButton("English" if lang == "ru" else "Русский", callback_data=f"extra_toggle:{lang}")]]
@@ -673,7 +700,7 @@ async def inline_query(update: Update, context: CallbackContext):
             results.append(InlineQueryResultArticle(
                 id=f"dict_{idx}", 
                 title=word,
-                description=re.sub(r"<[^>]+>", "", word_meaning).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").split("\n")[0][:100] or None,
+                description=re.sub(r"<[^>]+>", "", word_meaning).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").split("\n")[0].split(" — ", 1)[-1][:100] or None,  # the headword is the title already
                 input_message_content=InputTextMessageContent(
                     format_message_with_links(word, word_link_q, lang=share_lang, meaning=word_meaning), 
                     parse_mode="HTML", 
@@ -742,8 +769,8 @@ def main():
         # Command menu, so everyone sees that the Uposatha mode exists
         from telegram import BotCommand
         for lang_code, cmds in (
-            (None, [("start", "Start"), ("extra", "Mini Apps"), ("uposatha", "Uposatha days, next 30 days")]),
-            ("ru", [("start", "Начать"), ("extra", "Мини-приложения"), ("uposatha", "Дни Упосатхи на 30 дней")]),
+            (None, [("start", "Start"), ("language", "Language"), ("extra", "Mini Apps"), ("uposatha", "Uposatha days, next 30 days")]),
+            ("ru", [("start", "Начать"), ("language", "Язык"), ("extra", "Мини-приложения"), ("uposatha", "Дни Упосатхи на 30 дней")]),
         ):
             try:
                 await app.bot.set_my_commands([BotCommand(c, d) for c, d in cmds], language_code=lang_code)
@@ -764,10 +791,12 @@ def main():
             logger.info(f"callback_query data={update.callback_query.data!r} inline={bool(update.callback_query.inline_message_id)}")
     app.add_handler(TypeHandler(Update, log_update), group=-1)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CommandHandler("extra", extra_command))
     app.add_handler(CommandHandler("uposatha", uposatha_command))
     app.add_handler(CommandHandler("geo", geo_command))
     app.add_handler(CallbackQueryHandler(handle_language_selection, pattern="^lang_set:"))
+    app.add_handler(CallbackQueryHandler(handle_setlang, pattern=r"^setlang:"))
     app.add_handler(CallbackQueryHandler(handle_extra_toggle, pattern=r"^extra_toggle:"))
     app.add_handler(CallbackQueryHandler(upo_toggle, pattern=r"^upo:"))
     app.add_handler(CallbackQueryHandler(toggle_language, pattern=r"^(inline_)?toggle_lang:"))
