@@ -84,7 +84,7 @@ EXTRA_MESSAGES = {
         "http://t.me/dgift_bot/read\n"
         "🌐 Словарь\n"
         "http://t.me/dgift_bot/dict\n"
-        "🧠 Memo\n"
+        "🛞 Memo\n"
         "http://t.me/dgift_bot/memo\n\n"
     ),
     "en": (
@@ -95,7 +95,7 @@ EXTRA_MESSAGES = {
         "http://t.me/dhammagift_bot/read\n"
         "🌐 Dictionary\n"
         "http://t.me/dhammagift_bot/dict\n"
-        "🧠 Memo\n"
+        "🛞 Memo\n"
         "http://t.me/dhammagift_bot/memo\n\n"
     )
 }
@@ -356,7 +356,7 @@ def extra_keyboard(lang: str, private: bool) -> InlineKeyboardMarkup:
     rows = []
     if private:  # a Mini App button only works in a private chat; Memo has no t.me direct link yet
         memo_url = "https://dhamma.gift/ru/memo/index.html" if lang == "ru" else "https://dhamma.gift/memo/index.html"
-        rows.append([InlineKeyboardButton("🧠 Memo", web_app=WebAppInfo(url=memo_url))])
+        rows.append([InlineKeyboardButton("🛞 Memo", web_app=WebAppInfo(url=memo_url))])
     rows.append([InlineKeyboardButton("English" if lang == "ru" else "Русский", callback_data=f"extra_toggle:{lang}")])
     return InlineKeyboardMarkup(rows)
 
