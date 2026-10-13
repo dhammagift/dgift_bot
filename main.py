@@ -50,9 +50,10 @@ WELCOME_MESSAGES = {
         "Simply send me a word or reference (e.g. <code>saariputta</code> or <code>mn10</code>)\n\n\n"
         "Following commands available:\n"
         "/start - this message\n"
-        "/extra - Mini App links\n"
+        "/language - choose the interface language\n"
+        "/extra - Mini App links (search, reading, dictionary, Memo)\n"
         "/uposatha - Uposatha days for the next 30 days (<code>/uposatha Colombo</code> for a city; inline: <code>@dgift_bot uposatha</code>)\n"
-        "/help - Dhamma.gift help will be here\n\n"
+        "/docs - Dhamma.gift documentation\n\n"
         "Change Bots language 👇 Изменить язык \n"
     ),
     "ru": (
@@ -66,9 +67,10 @@ WELCOME_MESSAGES = {
         "Просто отправьте мне слово или номер сутты (например, <code>saariputta</code> или <code>mn10</code>)\n\n\n"
         "Доступны следующие команды:\n"
         "/start - это сообщение\n"
-        "/extra - ссылки на Mini Apps\n"
+        "/language - выбрать язык интерфейса\n"
+        "/extra - ссылки на Mini Apps (поиск, чтение, словарь, Memo)\n"
         "/uposatha - дни Упосатхи на 30 дней (<code>/uposatha Москва</code> — для города; в инлайне: <code>@dgift_bot упосатха</code>)\n"
-        "/help - здесь будет документация Dhamma.gift\n\n"
+        "/docs - документация Dhamma.gift\n\n"
         "Изменить язык Бота 👇 Change Language\n"
     )
 }
@@ -81,7 +83,9 @@ EXTRA_MESSAGES = {
         "📖 Чтение\n"
         "http://t.me/dgift_bot/read\n"
         "🌐 Словарь\n"
-        "http://t.me/dgift_bot/dict\n\n"
+        "http://t.me/dgift_bot/dict\n"
+        "🧠 Memo\n"
+        "http://t.me/dgift_bot/memo\n\n"
     ),
     "en": (
         "Mini Applications in English. You may want to pin this message for quick access:\n\n"
@@ -90,7 +94,9 @@ EXTRA_MESSAGES = {
         "📖 Read\n"
         "http://t.me/dhammagift_bot/read\n"
         "🌐 Dictionary\n"
-        "http://t.me/dhammagift_bot/dict\n\n"
+        "http://t.me/dhammagift_bot/dict\n"
+        "🧠 Memo\n"
+        "http://t.me/dhammagift_bot/memo\n\n"
     )
 }
 
@@ -346,10 +352,27 @@ async def handle_setlang(update: Update, context: CallbackContext):
         pass  # "message is not modified": the same language was tapped again
     await set_menu_button(update, new_lang)
 
+def extra_keyboard(lang: str, private: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if private:  # a Mini App button only works in a private chat; Memo has no t.me direct link yet
+        memo_url = "https://dhamma.gift/ru/memo/index.html" if lang == "ru" else "https://dhamma.gift/memo/index.html"
+        rows.append([InlineKeyboardButton("🧠 Memo", web_app=WebAppInfo(url=memo_url))])
+    rows.append([InlineKeyboardButton("English" if lang == "ru" else "Русский", callback_data=f"extra_toggle:{lang}")])
+    return InlineKeyboardMarkup(rows)
+
 async def extra_command(update: Update, context: CallbackContext):
     lang = get_user_lang(update.effective_user.id)
-    keyboard = [[InlineKeyboardButton("English" if lang == "ru" else "Русский", callback_data=f"extra_toggle:{lang}")]]
-    await update.message.reply_text(EXTRA_MESSAGES[lang], reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+    private = update.effective_chat.type == "private"
+    await update.effective_message.reply_text(EXTRA_MESSAGES[lang], reply_markup=extra_keyboard(lang, private), disable_web_page_preview=True)
+
+DOCS_TEXT = {
+    "en": ("📚 Dhamma.Gift documentation: the app, search, reader, voice, Uposatha, the Telegram bot, the API.", "Open the docs", "https://dhamma.gift/docs/"),
+    "ru": ("📚 Документация Dhamma.Gift: приложение, поиск, ридер, голос, Упосатха, Telegram-бот, API.", "Открыть документацию", "https://dhamma.gift/ru/docs/"),
+}
+
+async def docs_command(update: Update, context: CallbackContext):
+    text, label, url = DOCS_TEXT[get_user_lang(update.effective_user.id)]
+    await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, url=url)]]), disable_web_page_preview=True)
 
 async def handle_extra_toggle(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -357,7 +380,8 @@ async def handle_extra_toggle(update: Update, context: CallbackContext):
     new_lang = 'en' if query.data.split(':')[1] == 'ru' else 'ru'
     save_user_data(query.from_user.id, 'lang', new_lang)
     keyboard = [[InlineKeyboardButton("English" if new_lang == "ru" else "Русский", callback_data=f"extra_toggle:{new_lang}")]]
-    await query.edit_message_text(text=EXTRA_MESSAGES[new_lang], reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+    private = query.message.chat.type == "private"
+    await query.edit_message_text(text=EXTRA_MESSAGES[new_lang], reply_markup=extra_keyboard(new_lang, private), disable_web_page_preview=True)
 
 # === Uposatha schedule as plain text (engine: dg-node-prod uposatha-core.js via upo.js) ===
 UPO_WORDS = {"uposatha", "упосатха", "упосатхи", "упосатху"}
@@ -769,8 +793,8 @@ def main():
         # Command menu, so everyone sees that the Uposatha mode exists
         from telegram import BotCommand
         for lang_code, cmds in (
-            (None, [("start", "Start"), ("language", "Language"), ("extra", "Mini Apps"), ("uposatha", "Uposatha days, next 30 days")]),
-            ("ru", [("start", "Начать"), ("language", "Язык"), ("extra", "Мини-приложения"), ("uposatha", "Дни Упосатхи на 30 дней")]),
+            (None, [("start", "Start"), ("language", "Language"), ("extra", "Mini Apps"), ("docs", "Documentation"), ("uposatha", "Uposatha days, next 30 days")]),
+            ("ru", [("start", "Начать"), ("language", "Язык"), ("extra", "Мини-приложения"), ("docs", "Документация"), ("uposatha", "Дни Упосатхи на 30 дней")]),
         ):
             try:
                 await app.bot.set_my_commands([BotCommand(c, d) for c, d in cmds], language_code=lang_code)
@@ -793,6 +817,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CommandHandler("extra", extra_command))
+    app.add_handler(CommandHandler("docs", docs_command))
     app.add_handler(CommandHandler("uposatha", uposatha_command))
     app.add_handler(CommandHandler("geo", geo_command))
     app.add_handler(CallbackQueryHandler(handle_language_selection, pattern="^lang_set:"))
