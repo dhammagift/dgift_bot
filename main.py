@@ -79,24 +79,24 @@ EXTRA_MESSAGES = {
     "ru": (
         "Мини Приложения на Русском. Вы можете закрепить это сообщение для быстрого доступа:\n\n"
         "🔎 Поиск\n"
-        "http://t.me/dgift_bot/find\n"
+        "http://t.me/{bot}/find\n"
         "📖 Чтение\n"
-        "http://t.me/dgift_bot/read\n"
+        "http://t.me/{bot}/read\n"
         "🌐 Словарь\n"
-        "http://t.me/dgift_bot/dict\n"
+        "http://t.me/{bot}/dict\n"
         "🛞 Memo\n"
-        "http://t.me/dgift_bot/memo\n\n"
+        "http://t.me/{bot}/memo\n\n"
     ),
     "en": (
         "Mini Applications in English. You may want to pin this message for quick access:\n\n"
         "🔎 Search\n"
-        "http://t.me/dhammagift_bot/find\n"
+        "http://t.me/{bot}/find\n"
         "📖 Read\n"
-        "http://t.me/dhammagift_bot/read\n"
+        "http://t.me/{bot}/read\n"
         "🌐 Dictionary\n"
-        "http://t.me/dhammagift_bot/dict\n"
+        "http://t.me/{bot}/dict\n"
         "🛞 Memo\n"
-        "http://t.me/dhammagift_bot/memo\n\n"
+        "http://t.me/{bot}/memo\n\n"
     )
 }
 
@@ -363,7 +363,7 @@ def extra_keyboard(lang: str, private: bool) -> InlineKeyboardMarkup:
 async def extra_command(update: Update, context: CallbackContext):
     lang = get_user_lang(update.effective_user.id)
     private = update.effective_chat.type == "private"
-    await update.effective_message.reply_text(EXTRA_MESSAGES[lang], reply_markup=extra_keyboard(lang, private), disable_web_page_preview=True)
+    await update.effective_message.reply_text(EXTRA_MESSAGES[lang].replace("{bot}", context.bot.username), reply_markup=extra_keyboard(lang, private), disable_web_page_preview=True)
 
 DOCS_TEXT = {
     "en": ("📚 Dhamma.Gift documentation: the app, search, reader, voice, Uposatha, the Telegram bot, the API.", "Open the docs", "https://dhamma.gift/docs/"),
@@ -381,7 +381,7 @@ async def handle_extra_toggle(update: Update, context: CallbackContext):
     save_user_data(query.from_user.id, 'lang', new_lang)
     keyboard = [[InlineKeyboardButton("English" if new_lang == "ru" else "Русский", callback_data=f"extra_toggle:{new_lang}")]]
     private = query.message.chat.type == "private"
-    await query.edit_message_text(text=EXTRA_MESSAGES[new_lang], reply_markup=extra_keyboard(new_lang, private), disable_web_page_preview=True)
+    await query.edit_message_text(text=EXTRA_MESSAGES[new_lang].replace("{bot}", context.bot.username), reply_markup=extra_keyboard(new_lang, private), disable_web_page_preview=True)
 
 # === Uposatha schedule as plain text (engine: dg-node-prod uposatha-core.js via upo.js) ===
 UPO_WORDS = {"uposatha", "упосатха", "упосатхи", "упосатху"}
