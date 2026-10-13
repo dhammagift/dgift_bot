@@ -34,6 +34,7 @@ from telegram.ext import (
 
 from watcher import create_watcher_post_init
 import geolocal
+import dpdmini
 
 
 # === Сообщения ===
@@ -284,7 +285,10 @@ def create_keyboard(original_query: str, lang: str = "en", is_inline: bool = Fal
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def format_message_with_links(display_text: str, link_query: str, lang: str = "en") -> str:
+def format_message_with_links(display_text: str, link_query: str, lang: str = "en", meaning: str = "") -> str:
+    # `meaning`: the short DPD meaning (HTML, see dpdmini.py), shown under the word when the word is in the mini dictionary
+    if meaning:
+        display_text = f"{display_text}\n\n{meaning}"
     search_url = site_url(link_query, lang)
     dict_url = dict_url_for(link_query, lang)
     label_dict = "📘 Словарь" if lang == "ru" else "📘 Dictionary"
@@ -333,7 +337,7 @@ UPO_WORDS = {"uposatha", "упосатха", "упосатхи", "упосатх
 UPO_DEFAULT_TZ = "Asia/Kolkata"  # Bodh Gaya; without a city the day runs 18:00 to 18:00
 UPO_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upo_cache.json")
 GEO_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "geo_cache.json")
-GEO_CACHE_VERSION = 2  # bump it when the labels change: the cache lives on disk and has no expiry
+GEO_CACHE_VERSION = 3  # bump it when the labels change: the cache lives on disk and has no expiry
 # Which geocoder answers: "online" is the Open-Meteo API, "offline" the 34k cities kept in geo/ (instant,
 # no network, tolerates typos, but holds ~90 MB). Switched with /geo, remembered in geo_mode.txt; the file
 # wins over the GEO_MODE environment variable.
@@ -417,7 +421,7 @@ async def _geocode_request(name: str, lang: str) -> list:
         logger.error(f"geocode failed: {e}")
         return []
     return [{"label": ", ".join(dict.fromkeys(x for x in (g.get("name"), g.get("admin1"), g.get("country")) if x)),  # drops repeats like "Алматы, Алматы"
-             "lat": g["latitude"], "lon": g["longitude"], "tz": g.get("timezone", "UTC")}
+             "id": g.get("id"), "lat": g["latitude"], "lon": g["longitude"], "tz": g.get("timezone", "UTC")}
             for g in data.get("results", [])]
 
 async def uposatha_text(lang: str, place: dict = None) -> str:
@@ -490,6 +494,7 @@ async def geo_command(update: Update, context: CallbackContext):
         f"Города в памяти: {'да' if geolocal.loaded() else 'нет'} · RSS {rss} МБ")
 
 _place_labels = {}  # "lat,lon" -> label, so the language button can rebuild the header
+_place_ids = {}  # "lat,lon" -> Open-Meteo id, to name the same city in the other language
 _inline_seq = {}    # user_id -> number of the latest inline query, so a superseded keystroke can stop
 
 def _inline_touch(user_id: int) -> int:
@@ -506,6 +511,8 @@ def upo_keyboard(lang: str, place: dict = None) -> InlineKeyboardMarkup:
     if place:
         where = f"{round(place['lat'], 2)},{round(place['lon'], 2)},{place['tz']}"
         _place_labels[where.rsplit(",", 1)[0]] = place["label"]
+        if place.get("id"):
+            _place_ids[where.rsplit(",", 1)[0]] = place["id"]
     label = "Язык Ru/En" if lang == "ru" else "Lang En/Ru"
     new_lang = "en" if lang == "ru" else "ru"
     cal_label = "📅 Календарь упосатх" if lang == "ru" else "📅 Uposatha calendar"
@@ -523,6 +530,13 @@ async def upo_toggle(update: Update, context: CallbackContext):
     if where != "-":
         lat, lon, tz = where.split(",", 2)
         place = {"lat": float(lat), "lon": float(lon), "tz": tz, "label": _place_labels.get(f"{lat},{lon}", tz)}
+    if place and _place_ids.get(where.rsplit(",", 1)[0]):
+        # The saved label is in the language it was found in: ask Open-Meteo for the same place by id in the new one.
+        try:
+            g = await asyncio.to_thread(_fetch_json, "https://geocoding-api.open-meteo.com/v1/get?id=%s&language=%s" % (_place_ids[where.rsplit(",", 1)[0]], lang))
+            place["label"] = ", ".join(dict.fromkeys(x for x in (g.get("name"), g.get("admin1"), g.get("country")) if x))
+        except Exception as e:
+            logger.error(f"place relabel failed: {e}")
     text = await uposatha_text(lang, place)
     await query.edit_message_text(text=text, reply_markup=upo_keyboard(lang, place), parse_mode="HTML", disable_web_page_preview=True)
 
@@ -643,7 +657,7 @@ async def inline_query(update: Update, context: CallbackContext):
             title=f"✏️ Send: {display_text}" if interface_lang == "en" else f"✏️ Отправить: {display_text}",
             input_message_content=InputTextMessageContent(
                 # В сообщение вставляем полный текст, но ссылки формируем на основе короткого link_q
-                format_message_with_links(display_text, link_q, lang=share_lang), 
+                format_message_with_links(display_text, link_q, lang=share_lang, meaning=dpdmini.meaning(display_text, share_lang)), 
                 parse_mode="HTML", 
                 disable_web_page_preview=True
             ),
@@ -655,11 +669,13 @@ async def inline_query(update: Update, context: CallbackContext):
         # === Результат 2+: Подсказки из словаря ===
         for idx, word in enumerate(suggestions):
             word_link_q = get_link_query(word)
+            word_meaning = dpdmini.meaning(word, share_lang)
             results.append(InlineQueryResultArticle(
                 id=f"dict_{idx}", 
                 title=word,
+                description=re.sub(r"<[^>]+>", "", word_meaning).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").split("\n")[0][:100] or None,
                 input_message_content=InputTextMessageContent(
-                    format_message_with_links(word, word_link_q, lang=share_lang), 
+                    format_message_with_links(word, word_link_q, lang=share_lang, meaning=word_meaning), 
                     parse_mode="HTML", 
                     disable_web_page_preview=True
                 ),
@@ -684,7 +700,7 @@ async def handle_message(update: Update, context: CallbackContext):
     link_q = get_link_query(text)
     
     await update.message.reply_text(
-        format_message_with_links(display_text, link_q, lang=share_lang), 
+        format_message_with_links(display_text, link_q, lang=share_lang, meaning=dpdmini.meaning(display_text, share_lang)), 
         reply_markup=create_keyboard(text, lang=share_lang), 
         parse_mode="HTML", 
         disable_web_page_preview=True
@@ -711,7 +727,7 @@ async def toggle_language(update: Update, context: CallbackContext):
     link_q = get_link_query(original_text)
     
     await query.edit_message_text(
-        text=format_message_with_links(display_text, link_q, lang=new_lang), 
+        text=format_message_with_links(display_text, link_q, lang=new_lang, meaning=dpdmini.meaning(display_text, new_lang)), 
         reply_markup=create_keyboard(original_text, lang=new_lang, is_inline=is_inline), 
         parse_mode="HTML", 
         disable_web_page_preview=True
