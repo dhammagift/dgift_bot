@@ -307,7 +307,7 @@ async def set_menu_button(update: Update, lang: str):
     button_url = f"https://dhamma.gift/?{'lang=ru&' if lang == 'ru' else ''}source=pwa"
     try:
         await update.get_bot().set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonWebApp(text=button_text, web_app=WebAppInfo(url=button_url)))
-    except: pass
+    except Exception as e: logging.warning("set_chat_menu_button failed: %s", e)
 
 async def start(update: Update, context: CallbackContext):
     user_lang = get_user_lang(update.effective_user.id)
